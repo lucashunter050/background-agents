@@ -165,16 +165,15 @@ under 72 characters. Use the PR body for details, not the commit message.
 
 ## CI/CD
 
-Pushing to `main` auto-deploys changed services:
-
-- **Terraform** → control plane + D1 migrations + web app if `web_platform = "cloudflare"`
-  (triggers: `terraform/`, `packages/*/`)
-- **Vercel** → web app when `web_platform = "vercel"` (triggers: `packages/web/`,
-  `packages/shared/`)
+- **Terraform** → dispatch the Terraform workflow on the fork's `main` to deploy the control plane,
+  D1 migrations, Daytona snapshot, and Cloudflare web app. See
+  [the Daytona guide](docs/DAYTONA_FORK.md).
+- **Vercel** → pushes to `main` deploy the web app when `web_platform = "vercel"` (triggers:
+  `packages/web/`, `packages/shared/`)
 - **Vercel Docs** → public documentation is **not** auto-deployed; run the `Deploy Docs` workflow
   manually on `main` (requires the dedicated docs project secrets described in
   `packages/docs/README.md`)
-- **Modal** → data plane (triggers: `packages/modal-infra/`, deployed via Terraform apply)
+- **Modal** → Terraform can deploy it when selected as the sandbox provider.
 
 CI runs lint, typecheck, and tests for all TypeScript and Python packages on every push and PR.
 

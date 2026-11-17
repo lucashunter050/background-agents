@@ -67,8 +67,9 @@ node --version  # must print v24 or newer
      - Workers Routes: **Edit**
 
 2. **Create R2 Bucket** for Terraform state:
-   - Bucket name: `open-inspect-terraform-state`
-   - Generate R2 API token with read/write permissions
+   - Use the bucket named in
+     [the backend configuration](environments/production/backend.tfvars.example).
+   - Generate an R2 API token with read/write permissions scoped to the state bucket.
 
 3. **Note your Account ID** (found in dashboard URL)
 
