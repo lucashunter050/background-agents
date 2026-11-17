@@ -192,8 +192,8 @@ Terraform needs a place to store its state. We use Cloudflare R2.
 wrangler login
 
 
-# Create the state bucket
-wrangler r2 bucket create open-inspect-terraform-state
+# Create the bucket named in backend.tfvars
+wrangler r2 bucket create <your-state-bucket>
 ```
 
 Create an R2 API Token:
@@ -411,15 +411,17 @@ Edit the `backend.tfvars` and `terraform.tfvars` files you created in Step 1, in
 
 ### Configure `backend.tfvars`
 
-Fill in your R2 credentials:
+Set your state bucket, key, and R2 endpoint. Use the same bucket and key in local Terraform and GitHub Actions.
 
 ```hcl
-access_key = "your-r2-access-key-id"
-secret_key = "your-r2-secret-access-key"
+bucket = "your-state-bucket"
+key    = "production/terraform.tfstate"
 endpoints = {
   s3 = "https://YOUR_CLOUDFLARE_ACCOUNT_ID.r2.cloudflarestorage.com"
 }
 ```
+
+Set `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` in your shell from your R2 credentials before running local Terraform commands. These are the standard S3 backend environment variables. For GitHub Actions, set `TF_STATE_BUCKET` and `TF_STATE_KEY` as repository variables and store the R2 credentials in `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY`. See the [Daytona fork guide](DAYTONA_FORK.md) for the first deployment.
 
 ### Configure `terraform.tfvars`
 

@@ -41,7 +41,12 @@ on:
       - "packages/web/**"
       - ".github/workflows/terraform.yml"
       - ".nvmrc"
-  workflow_dispatch: # Allow manual trigger
+  workflow_dispatch:
+    inputs:
+      bootstrap:
+        description: "First apply only. Create Workers and Durable Object classes with bindings disabled."
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -64,23 +69,29 @@ jobs:
     steps:
       - name: Check if secrets are configured
         id: check
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+          TF_STATE_KEY: ${{ vars.TF_STATE_KEY }}
         run: |
-          # Gate on every credential the plan and apply jobs consume to reach a
-          # backend, not just two of them. A partial configuration used to report
-          # has-secrets=true and then fail inside `terraform init` with an empty
-          # access/secret key or an endpoint URL of "https://.r2.cloudflarestorage.com",
-          # instead of skipping with the notice below. CLOUDFLARE_ACCOUNT_ID is read
-          # with the same `vars || secrets` precedence the init steps use, so a
-          # variable-configured deployment is not mistaken for an unconfigured one.
-          account_id="${{ vars.CLOUDFLARE_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID }}"
-          if [ -n "${{ secrets.CLOUDFLARE_API_TOKEN }}" ] &&
-            [ -n "${{ secrets.R2_ACCESS_KEY_ID }}" ] &&
-            [ -n "${{ secrets.R2_SECRET_ACCESS_KEY }}" ] &&
-            [ -n "$account_id" ]; then
-            echo "has-secrets=true" >> $GITHUB_OUTPUT
+          missing=()
+          for name in CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_API_TOKEN R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY TF_STATE_BUCKET TF_STATE_KEY; do
+            if [[ -z "${!name}" ]]; then
+              missing+=("$name")
+            fi
+          done
+          if (( ${#missing[@]} == 0 )); then
+            echo "has-secrets=true" >> "$GITHUB_OUTPUT"
           else
-            echo "has-secrets=false" >> $GITHUB_OUTPUT
-            echo "::notice::Terraform plan/apply skipped - secrets not configured. See docs/GETTING_STARTED.md for setup instructions."
+            echo "has-secrets=false" >> "$GITHUB_OUTPUT"
+            if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+              echo "::error::Missing Terraform backend settings: ${missing[*]}"
+              exit 1
+            fi
+            echo "::notice::Terraform plan skipped. Missing backend settings: ${missing[*]}"
           fi
 
   validate:
@@ -138,7 +149,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     needs: [validate, check-secrets]
-    if: github.event_name == 'pull_request' && needs.check-secrets.outputs.has-secrets == 'true'
+    if: github.event_name == 'pull_request' && github.event.repository.private && github.event.pull_request.head.repo.full_name == github.repository && needs.check-secrets.outputs.has-secrets == 'true'
     outputs:
       outcome: ${{ steps.plan.outcome }}
     steps:
@@ -172,14 +183,21 @@ jobs:
       - name: Terraform Init
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+          TF_STATE_KEY: ${{ vars.TF_STATE_KEY }}
         run: |
           terraform init \
-            -backend-config="access_key=${{ secrets.R2_ACCESS_KEY_ID }}" \
-            -backend-config="secret_key=${{ secrets.R2_SECRET_ACCESS_KEY }}" \
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="key=${TF_STATE_KEY}" \
             -backend-config="endpoints={s3=\"https://${CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com\"}"
         working-directory: ${{ env.TF_WORKING_DIR }}
 
       - name: Stage SchedulerDO deletion migration
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: |
           set -euo pipefail
           # Read state and parse it as separate steps: piping straight into jq
@@ -202,10 +220,12 @@ jobs:
           command_token="$(openssl rand -hex 32)"
           echo "::stop-commands::$command_token"
           trap 'printf "\n::%s::\n" "$command_token"' EXIT
-          terraform plan -no-color -out=tfplan 2>&1 | tee plan_output.txt
+          terraform plan -no-color 2>&1 | tee plan_output.txt
         working-directory: ${{ env.TF_WORKING_DIR }}
         continue-on-error: true
         env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           TF_VAR_cloudflare_account_id: ${{ vars.CLOUDFLARE_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID }}
           TF_VAR_cloudflare_worker_subdomain: ${{ vars.CLOUDFLARE_WORKER_SUBDOMAIN || secrets.CLOUDFLARE_WORKER_SUBDOMAIN }}
@@ -336,6 +356,7 @@ jobs:
         uses: actions/github-script@v9
         env:
           HAS_SECRETS: ${{ needs.check-secrets.outputs.has-secrets }}
+          PRIVATE_REPO: ${{ github.event.repository.private }}
           CHECK_SECRETS_RESULT: ${{ needs.check-secrets.result }}
           VALIDATION_RESULT: ${{ needs.validate.result }}
           FORMAT_OUTCOME: ${{ needs.validate.outputs.fmt }}
@@ -364,6 +385,8 @@ jobs:
               planNote = '\n\n> **Note:** Terraform plan was skipped because secrets are not configured. This is expected for external contributors. See [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) for setup instructions.';
             } else if (process.env.HAS_SECRETS !== 'true') {
               planNote = '\n\n> **Warning:** Check Secrets completed without a valid secret-availability result.';
+            } else if (process.env.PRIVATE_REPO === 'false') {
+              planNote = '\n\n> **Note:** Run the credentialed Terraform plan locally for public repositories.';
             }
             const output = `### Terraform Validation Results
 
@@ -428,8 +451,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     needs: [validate, check-secrets]
-    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && needs.check-secrets.outputs.has-secrets == 'true'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && needs.check-secrets.outputs.has-secrets == 'true'
     environment: production
+    env:
+      SANDBOX_PROVIDER: ${{ vars.SANDBOX_PROVIDER || secrets.SANDBOX_PROVIDER || 'modal' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -454,7 +479,8 @@ jobs:
       - name: Setup uv
         uses: astral-sh/setup-uv@v7
 
-      - name: Install Modal and Python dependencies
+      - name: Install Modal dependencies
+        if: env.SANDBOX_PROVIDER == 'modal' || env.SANDBOX_PROVIDER == 'modal-vm'
         run: uv sync --frozen
         working-directory: packages/modal-infra
 
@@ -466,14 +492,21 @@ jobs:
       - name: Terraform Init
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+          TF_STATE_KEY: ${{ vars.TF_STATE_KEY }}
         run: |
           terraform init \
-            -backend-config="access_key=${{ secrets.R2_ACCESS_KEY_ID }}" \
-            -backend-config="secret_key=${{ secrets.R2_SECRET_ACCESS_KEY }}" \
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="key=${TF_STATE_KEY}" \
             -backend-config="endpoints={s3=\"https://${CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com\"}"
         working-directory: ${{ env.TF_WORKING_DIR }}
 
       - name: Stage SchedulerDO deletion migration
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: |
           set -euo pipefail
           # Read state and parse it as separate steps: piping straight into jq
@@ -491,6 +524,8 @@ jobs:
         run: terraform apply -auto-approve
         working-directory: ${{ env.TF_WORKING_DIR }}
         env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           TF_VAR_cloudflare_account_id: ${{ vars.CLOUDFLARE_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID }}
           TF_VAR_cloudflare_worker_subdomain: ${{ vars.CLOUDFLARE_WORKER_SUBDOMAIN || secrets.CLOUDFLARE_WORKER_SUBDOMAIN }}
@@ -547,9 +582,9 @@ jobs:
           TF_VAR_linear_bot_default_model: "${{ vars.LINEAR_BOT_DEFAULT_MODEL || secrets.LINEAR_BOT_DEFAULT_MODEL || 'claude-sonnet-4-6' }}"
           TF_VAR_web_platform: "${{ vars.WEB_PLATFORM || secrets.WEB_PLATFORM || 'vercel' }}"
           TF_VAR_web_serverless_region: "${{ vars.WEB_SERVERLESS_REGION || 'iad1' }}"
-          TF_VAR_enable_durable_object_bindings: "${{ vars.ENABLE_DURABLE_OBJECT_BINDINGS || secrets.ENABLE_DURABLE_OBJECT_BINDINGS || 'true' }}"
-          TF_VAR_enable_service_bindings: "${{ vars.ENABLE_SERVICE_BINDINGS || secrets.ENABLE_SERVICE_BINDINGS || 'true' }}"
-          TF_VAR_sandbox_provider: "${{ vars.SANDBOX_PROVIDER || secrets.SANDBOX_PROVIDER || 'modal' }}"
+          TF_VAR_enable_durable_object_bindings: "${{ inputs.bootstrap && 'false' || vars.ENABLE_DURABLE_OBJECT_BINDINGS || secrets.ENABLE_DURABLE_OBJECT_BINDINGS || 'true' }}"
+          TF_VAR_enable_service_bindings: "${{ inputs.bootstrap && 'false' || vars.ENABLE_SERVICE_BINDINGS || secrets.ENABLE_SERVICE_BINDINGS || 'true' }}"
+          TF_VAR_sandbox_provider: ${{ env.SANDBOX_PROVIDER }}
           TF_VAR_session_do_location_hint: "${{ vars.SESSION_DO_LOCATION_HINT || '' }}"
           TF_VAR_sandbox_inactivity_timeout_ms: "${{ vars.SANDBOX_INACTIVITY_TIMEOUT_MS || secrets.SANDBOX_INACTIVITY_TIMEOUT_MS || '600000' }}"
           TF_VAR_sandbox_unattended_inactivity_timeout_ms: "${{ vars.SANDBOX_UNATTENDED_INACTIVITY_TIMEOUT_MS || secrets.SANDBOX_UNATTENDED_INACTIVITY_TIMEOUT_MS || '120000' }}"
