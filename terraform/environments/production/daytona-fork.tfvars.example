@@ -1,0 +1,22 @@
+deployment_name  = "lucashunter050-daytona"
+web_platform     = "cloudflare"
+sandbox_provider = "daytona"
+
+allowed_users     = "lucashunter050"
+teams_enforcement = "on"
+
+enable_slack_bot  = false
+enable_linear_bot = false
+enable_github_bot = false
+docs_site_enabled = false
+
+daytona_api_url                  = "https://app.daytona.io/api"
+daytona_base_snapshot            = "lucashunter050-open-inspect"
+daytona_base_snapshot_memory_gib = 4
+daytona_prebuilds_enabled        = false
+
+sandbox_inactivity_timeout_ms            = 600000
+sandbox_unattended_inactivity_timeout_ms = 120000
+
+enable_durable_object_bindings = false
+enable_service_bindings        = false
